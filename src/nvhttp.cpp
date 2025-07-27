@@ -28,6 +28,9 @@
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
+#ifdef _WIN32
+#include "platform/windows/utils.h"
+#endif
 #include "platform/common.h"
 #include "process.h"
 #include "rtsp.h"
@@ -148,6 +151,26 @@ namespace nvhttp {
   std::unordered_map<std::string, pair_session_t> map_id_sess;
   client_t client_root;
   std::atomic<uint32_t> session_id_counter;
+
+  /**
+   * @brief Check if autologin is allowed for a client when Windows session is locked
+   * @param client_cert The client certificate to check
+   * @return true if autologin is allowed, false otherwise
+   */
+  bool is_autologin_allowed(const std::string& client_cert) {
+    // Find the named certificate for this client
+    auto it = std::find_if(client_root.named_devices.begin(), client_root.named_devices.end(),
+      [&client_cert](const crypto::p_named_cert_t& named_cert) {
+        return named_cert->cert == client_cert;
+      });
+    
+    if (it == client_root.named_devices.end()) {
+      return false; // Client not found or not paired
+    }
+    
+    // Check if client has autologin permission
+    return !!((*it)->perm & crypto::PERM::autologin);
+  }
 
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
@@ -768,6 +791,18 @@ namespace nvhttp {
           getservercert(ptr->second, tree, crypto::rand(16));
           return;
         }
+
+#ifdef _WIN32
+        // Check if autologin is allowed when Windows session is locked
+        if (is_user_session_locked() && is_autologin_allowed(ptr->second.client.cert)) {
+          BOOST_LOG(info) << "Windows session is locked and client has autologin permission - automatically pairing device: " << ptr->second.client.name;
+          
+          // Generate a secure PIN for autologin
+          std::string autologin_pin = crypto::rand_alphabet(4, "0123456789"sv);
+          getservercert(ptr->second, tree, autologin_pin);
+          return;
+        }
+#endif
 
         if (config::sunshine.flags[config::flag::PIN_STDIN]) {
           std::string pin;
